@@ -124,10 +124,15 @@ struct ContentView: View {
                 .font(.subheadline.weight(.medium)).foregroundStyle(PausePalette.teal)
             Text("A voluntary pause for websites. Coverage depends on the browser and iOS; other app traffic may continue.")
                 .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            Button("Daily check-in") { tab = .progress }
-                .font(.subheadline.weight(.semibold))
-            Button("Explore your support options") { tab = .support }
-                .font(.subheadline.weight(.semibold))
+            VStack(spacing: 10) {
+                Button { tab = .progress } label: {
+                    SupportRow(symbol: "calendar", title: "Daily check-in")
+                }
+                Button { tab = .support } label: {
+                    SupportRow(symbol: "leaf", title: "Explore your support options")
+                }
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -392,86 +397,86 @@ private struct CheckInView: View {
 
 private struct GamblingLog: Codable {
     enum Answer: String, Codable { case yes, no, skipped }
-    var setUp = false
-    var startingDay: String?
+
+    private enum CodingKeys: String, CodingKey { case answers }
+    private enum LegacyKeys: String, CodingKey { case startingDay }
+
     var answers: [String: Answer] = [:]
 
-    var lastReportedDay: String? {
-        (answers.keys.filter { answers[$0] == .yes } + [startingDay].compactMap { $0 }).max()
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        answers = try container.decodeIfPresent([String: Answer].self, forKey: .answers) ?? [:]
+
+        let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+        if let startingDay = try legacy.decodeIfPresent(String.self, forKey: .startingDay),
+           answers[startingDay] == nil || answers[startingDay] == .skipped {
+            answers[startingDay] = .yes
+        }
+        answers = answers.filter { $0.value != .skipped }
     }
 
-    func freeDays(monthOf today: String) -> Int {
-        answers.filter { $0.value == .no && $0.key.prefix(7) == today.prefix(7) && $0.key <= today && $0.key != startingDay }.count
+    func freeDays(through today: String) -> Int {
+        answers.filter { $0.value == .no && $0.key <= today }.count
+    }
+
+    func streak(asOf now: Date, calendar: Calendar) -> Int {
+        var day = calendar.startOfDay(for: now)
+        // An unlogged today gives the user the rest of today to continue the streak.
+        if answers[Self.dayKey(day, calendar: calendar)] == nil,
+           let yesterday = calendar.date(byAdding: .day, value: -1, to: day) {
+            day = yesterday
+        }
+
+        var count = 0
+        while answers[Self.dayKey(day, calendar: calendar)] == .no {
+            count += 1
+            guard let previous = calendar.date(byAdding: .day, value: -1, to: day) else { break }
+            day = previous
+        }
+        return count
+    }
+
+    // Keep check-ins on the calendar day they were logged, including after travel.
+    static func dayKey(_ date: Date, calendar: Calendar) -> String {
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 }
 
 private struct GamblingCheckIn: View {
     @AppStorage("pauseme.gamblingLog.v1") private var data = Data()
-    @State private var selectedDate: Date?
-    @State private var startingDate: Date?
-    @State private var editingStart = false
+    @Environment(\.locale) private var locale
+    @State private var displayedMonth: Date?
     @State private var confirmClear = false
 
     let now: Date
+
+    private var calendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = locale
+        return calendar
+    }
 
     private var log: GamblingLog {
         (try? JSONDecoder().decode(GamblingLog.self, from: data)) ?? GamblingLog()
     }
 
     var body: some View {
-        let today = dayKey(now)
-        let selectedDay = dayKey(min(selectedDate ?? now, now))
-        let currentAnswer = log.answers[selectedDay]
+        let today = GamblingLog.dayKey(now, calendar: calendar)
+        let log = log
 
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("Gambling check-in").font(.title2.bold())
-            Text("Optional. Your answers are saved locally in PauseMe.")
+            LabeledContent("Gambling-free days", value: String(log.freeDays(through: today)))
+            LabeledContent("Current streak", value: String(localized: "\(log.streak(asOf: now, calendar: calendar)) days"))
+            Text("Tap once for gambling-free. Tap twice for gambled.")
                 .font(.footnote).foregroundStyle(.secondary)
-            LabeledContent("Last reported gambling date", value: log.lastReportedDay.map(displayDay) ?? "Not recorded")
-            LabeledContent("Gambling-free days logged this month", value: String(log.freeDays(monthOf: today)))
 
-            if !log.setUp || editingStart {
-                Divider()
-                Text("When did you last gamble?").font(.headline)
-                DatePicker("Last gambling date", selection: Binding(
-                    get: { min(startingDate ?? now, now) },
-                    set: { startingDate = $0 }
-                ), in: ...now, displayedComponents: .date)
-                Button("Save date") { saveStart(dayKey(min(startingDate ?? now, now))) }
-                    .buttonStyle(.borderedProminent)
-                HStack {
-                    Button("I’m not sure") { saveStart(nil) }
-                    Spacer()
-                    Button("Skip") {
-                        if editingStart {
-                            editingStart = false
-                        } else {
-                            saveStart(nil)
-                        }
-                    }
-                }
-            } else {
-                Button("Edit starting date") {
-                    startingDate = log.startingDay.flatMap(dateFromKey)
-                    editingStart = true
-                }
-                .font(.subheadline)
-            }
+            monthGrid(today: today, answers: log.answers)
 
-            Divider()
-            DatePicker("Check-in date", selection: Binding(
-                get: { min(selectedDate ?? now, now) },
-                set: { selectedDate = dayKey($0) == today ? nil : $0 }
-            ), in: ...now, displayedComponents: .date)
-            Text(selectedDay == today ? "Did you gamble today?" : "Did you gamble that day?")
-                .font(.headline)
-            HStack {
-                answerButton("Yes", answer: .yes, selected: currentAnswer, day: selectedDay)
-                answerButton("No", answer: .no, selected: currentAnswer, day: selectedDay)
-                answerButton("Skip", answer: .skipped, selected: currentAnswer, day: selectedDay)
-            }
-
-            if log.setUp || !log.answers.isEmpty {
+            if !log.answers.isEmpty {
                 Button("Clear gambling check-ins", role: .destructive) { confirmClear = true }
                     .font(.footnote)
             }
@@ -482,54 +487,123 @@ private struct GamblingCheckIn: View {
         .confirmationDialog("Clear your gambling check-ins?", isPresented: $confirmClear, titleVisibility: .visible) {
             Button("Clear check-ins", role: .destructive) {
                 data = Data()
-                selectedDate = nil
-                startingDate = nil
-                editingStart = false
+                displayedMonth = nil
             }
             Button("Cancel", role: .cancel) { }
         }
     }
 
-    private func answerButton(_ title: String, answer: GamblingLog.Answer, selected: GamblingLog.Answer?, day: String) -> some View {
-        Button {
-            var updated = log
-            updated.answers[day] = answer
-            save(updated)
-        } label: {
-            Label(title, systemImage: selected == answer ? "checkmark.circle.fill" : "circle")
+    private func monthGrid(today: String, answers: [String: GamblingLog.Answer]) -> some View {
+        let month = calendar.dateInterval(of: .month, for: min(displayedMonth ?? now, now))?.start ?? now
+        let firstWeekday = calendar.firstWeekday
+        let leadingSpaces = (calendar.component(.weekday, from: month) - firstWeekday + 7) % 7
+        let days = calendar.range(of: .day, in: .month, for: month)?.count ?? 0
+
+        return VStack(spacing: 4) {
+            HStack {
+                monthButton("Previous month", symbol: "chevron.left", offset: -1, from: month)
+                Text(month.formatted(.dateTime.month(.wide).year().locale(locale)))
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityAddTraits(.isHeader)
+                monthButton("Next month", symbol: "chevron.right", offset: 1, from: month)
+                    .disabled(calendar.isDate(month, equalTo: now, toGranularity: .month))
+            }
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 7), spacing: 2) {
+                ForEach(0..<7) { offset in
+                    Text(calendar.shortStandaloneWeekdaySymbols[(firstWeekday - 1 + offset) % 7])
+                        .font(.caption2.weight(.medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                }
+                ForEach(0..<leadingSpaces, id: \.self) { _ in
+                    Color.clear.accessibilityHidden(true)
+                }
+                ForEach(0..<days) { offset in
+                    if let date = calendar.date(byAdding: .day, value: offset, to: month) {
+                        let day = GamblingLog.dayKey(date, calendar: calendar)
+                        dayCell(offset + 1, date: date, day: day, today: today, answer: answers[day])
+                    }
+                }
+            }
         }
-        .buttonStyle(.bordered)
-        .accessibilityAddTraits(selected == answer ? .isSelected : [])
     }
 
-    private func saveStart(_ day: String?) {
+    private func monthButton(_ label: String, symbol: String, offset: Int, from month: Date) -> some View {
+        Button {
+            guard let target = calendar.date(byAdding: .month, value: offset, to: month) else { return }
+            displayedMonth = calendar.isDate(target, equalTo: now, toGranularity: .month) ? nil : target
+        } label: {
+            Image(systemName: symbol)
+                .font(.subheadline.weight(.semibold))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel(Text(label))
+    }
+
+    @ViewBuilder
+    private func dayCell(_ number: Int, date: Date, day: String, today: String, answer: GamblingLog.Answer?) -> some View {
+        let isFuture = day > today
+        let status = answer == .no ? "Gambling-free" : answer == .yes ? "Gambled" : "Unlogged"
+        let circle = VStack(spacing: 0) {
+            Text(number, format: .number)
+                .font(.caption.weight(.semibold))
+            if let answer {
+                Image(systemName: answer == .no ? "checkmark" : "minus")
+                    .font(.system(size: 8, weight: .bold))
+            }
+        }
+        .frame(width: 30, height: 30)
+        .foregroundStyle(answer == .no ? .white : PausePalette.slate)
+        .background(answer == .no ? PausePalette.deep : answer == .yes ? Color.orange.opacity(0.25) : PausePalette.mist, in: Circle())
+        .overlay {
+            if day == today {
+                Circle().strokeBorder(PausePalette.teal, lineWidth: 2)
+            }
+        }
+        .opacity(isFuture ? 0.35 : 1)
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .contentShape(Rectangle())
+
+        if isFuture {
+            circle.accessibilityHidden(true)
+        } else {
+            circle
+                .gesture(
+                    TapGesture(count: 2).onEnded { _ in setAnswer(.yes, for: day) }
+                        .exclusively(before: TapGesture().onEnded { _ in setAnswer(.no, for: day) })
+                )
+                .contextMenu {
+                    Button("Mark gambling-free") { setAnswer(.no, for: day) }
+                    Button("Mark gambled") { setAnswer(.yes, for: day) }
+                    if answer != nil {
+                        Button("Clear this day", role: .destructive) { setAnswer(nil, for: day) }
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text(date.formatted(.dateTime.weekday(.wide).day().month(.wide).year().locale(locale))))
+                .accessibilityValue(Text(status))
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { setAnswer(.no, for: day) }
+                .accessibilityAction(named: Text("Mark gambled")) { setAnswer(.yes, for: day) }
+                .accessibilityActions {
+                    if answer != nil {
+                        Button("Clear this day") { setAnswer(nil, for: day) }
+                    }
+                }
+        }
+    }
+
+    private func setAnswer(_ answer: GamblingLog.Answer?, for day: String) {
         var updated = log
-        updated.setUp = true
-        updated.startingDay = day
-        save(updated)
-        editingStart = false
-    }
-
-    private func save(_ updated: GamblingLog) {
+        updated.answers[day] = answer
         if let encoded = try? JSONEncoder().encode(updated) {
             data = encoded
         }
-    }
-
-    // Save calendar days so travel does not move existing check-ins to another date.
-    private func dayKey(_ date: Date) -> String {
-        let parts = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day], from: date)
-        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
-    }
-
-    private func dateFromKey(_ key: String) -> Date? {
-        let parts = key.split(separator: "-").compactMap { Int($0) }
-        guard parts.count == 3 else { return nil }
-        return Calendar(identifier: .gregorian).date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
-    }
-
-    private func displayDay(_ key: String) -> String {
-        dateFromKey(key)?.formatted(date: .abbreviated, time: .omitted) ?? key
     }
 }
 

@@ -535,6 +535,8 @@ private struct GamblingCheckIn: View {
 
 private struct ProgressView: View {
     @ObservedObject var session: PauseSession
+    let now: Date
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {

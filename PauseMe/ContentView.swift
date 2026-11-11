@@ -26,7 +26,7 @@ struct ContentView: View {
         TabView(selection: $tab) {
             home.tabItem { Label("Home", systemImage: "house") }.tag(PauseTab.home)
             SupportView().tabItem { Label("Support", systemImage: "leaf") }.tag(PauseTab.support)
-            ProgressView(session: session).tabItem { Label("Progress", systemImage: "chart.bar.xaxis") }.tag(PauseTab.progress)
+            ProgressView(session: session, now: now).tabItem { Label("Progress", systemImage: "chart.bar.xaxis") }.tag(PauseTab.progress)
             SettingsView(session: session, minutes: $preferredMinutes)
                 .tabItem { Label("Settings", systemImage: "gearshape") }.tag(PauseTab.settings)
         }
@@ -124,6 +124,8 @@ struct ContentView: View {
                 .font(.subheadline.weight(.medium)).foregroundStyle(PausePalette.teal)
             Text("A voluntary pause for websites. Coverage depends on the browser and iOS; other app traffic may continue.")
                 .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Button("Daily check-in") { tab = .progress }
+                .font(.subheadline.weight(.semibold))
             Button("Explore your support options") { tab = .support }
                 .font(.subheadline.weight(.semibold))
         }
@@ -387,12 +389,157 @@ private struct CheckInView: View {
     }
 }
 
+
+private struct GamblingLog: Codable {
+    enum Answer: String, Codable { case yes, no, skipped }
+    var setUp = false
+    var startingDay: String?
+    var answers: [String: Answer] = [:]
+
+    var lastReportedDay: String? {
+        (answers.keys.filter { answers[$0] == .yes } + [startingDay].compactMap { $0 }).max()
+    }
+
+    func freeDays(monthOf today: String) -> Int {
+        answers.filter { $0.value == .no && $0.key.prefix(7) == today.prefix(7) && $0.key <= today && $0.key != startingDay }.count
+    }
+}
+
+private struct GamblingCheckIn: View {
+    @AppStorage("pauseme.gamblingLog.v1") private var data = Data()
+    @State private var selectedDate: Date?
+    @State private var startingDate: Date?
+    @State private var editingStart = false
+    @State private var confirmClear = false
+
+    let now: Date
+
+    private var log: GamblingLog {
+        (try? JSONDecoder().decode(GamblingLog.self, from: data)) ?? GamblingLog()
+    }
+
+    var body: some View {
+        let today = dayKey(now)
+        let selectedDay = dayKey(min(selectedDate ?? now, now))
+        let currentAnswer = log.answers[selectedDay]
+
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Gambling check-in").font(.title2.bold())
+            Text("Optional. Your answers are saved locally in PauseMe.")
+                .font(.footnote).foregroundStyle(.secondary)
+            LabeledContent("Last reported gambling date", value: log.lastReportedDay.map(displayDay) ?? "Not recorded")
+            LabeledContent("Gambling-free days logged this month", value: String(log.freeDays(monthOf: today)))
+
+            if !log.setUp || editingStart {
+                Divider()
+                Text("When did you last gamble?").font(.headline)
+                DatePicker("Last gambling date", selection: Binding(
+                    get: { min(startingDate ?? now, now) },
+                    set: { startingDate = $0 }
+                ), in: ...now, displayedComponents: .date)
+                Button("Save date") { saveStart(dayKey(min(startingDate ?? now, now))) }
+                    .buttonStyle(.borderedProminent)
+                HStack {
+                    Button("I’m not sure") { saveStart(nil) }
+                    Spacer()
+                    Button("Skip") {
+                        if editingStart {
+                            editingStart = false
+                        } else {
+                            saveStart(nil)
+                        }
+                    }
+                }
+            } else {
+                Button("Edit starting date") {
+                    startingDate = log.startingDay.flatMap(dateFromKey)
+                    editingStart = true
+                }
+                .font(.subheadline)
+            }
+
+            Divider()
+            DatePicker("Check-in date", selection: Binding(
+                get: { min(selectedDate ?? now, now) },
+                set: { selectedDate = dayKey($0) == today ? nil : $0 }
+            ), in: ...now, displayedComponents: .date)
+            Text(selectedDay == today ? "Did you gamble today?" : "Did you gamble that day?")
+                .font(.headline)
+            HStack {
+                answerButton("Yes", answer: .yes, selected: currentAnswer, day: selectedDay)
+                answerButton("No", answer: .no, selected: currentAnswer, day: selectedDay)
+                answerButton("Skip", answer: .skipped, selected: currentAnswer, day: selectedDay)
+            }
+
+            if log.setUp || !log.answers.isEmpty {
+                Button("Clear gambling check-ins", role: .destructive) { confirmClear = true }
+                    .font(.footnote)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white, in: RoundedRectangle(cornerRadius: 18))
+        .confirmationDialog("Clear your gambling check-ins?", isPresented: $confirmClear, titleVisibility: .visible) {
+            Button("Clear check-ins", role: .destructive) {
+                data = Data()
+                selectedDate = nil
+                startingDate = nil
+                editingStart = false
+            }
+            Button("Cancel", role: .cancel) { }
+        }
+    }
+
+    private func answerButton(_ title: String, answer: GamblingLog.Answer, selected: GamblingLog.Answer?, day: String) -> some View {
+        Button {
+            var updated = log
+            updated.answers[day] = answer
+            save(updated)
+        } label: {
+            Label(title, systemImage: selected == answer ? "checkmark.circle.fill" : "circle")
+        }
+        .buttonStyle(.bordered)
+        .accessibilityAddTraits(selected == answer ? .isSelected : [])
+    }
+
+    private func saveStart(_ day: String?) {
+        var updated = log
+        updated.setUp = true
+        updated.startingDay = day
+        save(updated)
+        editingStart = false
+    }
+
+    private func save(_ updated: GamblingLog) {
+        if let encoded = try? JSONEncoder().encode(updated) {
+            data = encoded
+        }
+    }
+
+    // Save calendar days so travel does not move existing check-ins to another date.
+    private func dayKey(_ date: Date) -> String {
+        let parts = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+    }
+
+    private func dateFromKey(_ key: String) -> Date? {
+        let parts = key.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3 else { return nil }
+        return Calendar(identifier: .gregorian).date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
+    }
+
+    private func displayDay(_ key: String) -> String {
+        dateFromKey(key)?.formatted(date: .abbreviated, time: .omitted) ?? key
+    }
+}
+
 private struct ProgressView: View {
     @ObservedObject var session: PauseSession
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 BrandHeader().frame(maxWidth: .infinity).padding(.top, 30)
+                GamblingCheckIn(now: now)
                 Text("Space you have made").font(.title.bold())
                 Text("Every pause is a moment to choose what happens next.").font(.subheadline).foregroundStyle(.secondary)
                 HStack(spacing: 12) {

@@ -4,6 +4,11 @@ import FamilyControls
 import DeviceActivity
 import ManagedSettings
 
+enum PauseScope: String, Codable {
+    case websites
+    case appsAndWebsites
+}
+
 struct PauseRecord: Codable, Identifiable {
     let id: UUID
     let startedAt: Date
@@ -31,6 +36,8 @@ final class PauseSession: ObservableObject {
         let endDate: Date
         // Optional for compatibility with pauses saved by the original prototype.
         let startedAt: Date?
+        // Pauses saved before app shielding used the web filter only.
+        let scope: PauseScope?
     }
 
     private let center = DeviceActivityCenter()
@@ -38,6 +45,7 @@ final class PauseSession: ObservableObject {
     private let stateKey = "pauseme.session.v1"
     private let historyKey = "pauseme.history.v1"
     private var saved: SavedSession?
+    var activeScope: PauseScope { saved?.scope ?? .websites }
 
     init() {
         if let data = defaults.data(forKey: stateKey) {
@@ -84,21 +92,22 @@ final class PauseSession: ObservableObject {
         }
     }
 
-    func start(minutes: Int = 30) {
+    func start(minutes: Int = 30, scope: PauseScope = .websites) {
         refresh()
         guard authorized, saved == nil, [15, 30, 60].contains(minutes) else { return }
         let now = Date()
-        begin(endingAt: now.addingTimeInterval(TimeInterval(minutes * 60)), startedAt: now)
+        begin(endingAt: now.addingTimeInterval(TimeInterval(minutes * 60)), startedAt: now, scope: scope)
     }
 
     func extend() {
         refresh()
         guard authorized, let saved else { return }
         begin(endingAt: saved.endDate.addingTimeInterval(15 * 60),
-              startedAt: saved.startedAt ?? saved.endDate.addingTimeInterval(-PauseConfiguration.duration))
+              startedAt: saved.startedAt ?? saved.endDate.addingTimeInterval(-PauseConfiguration.duration),
+              scope: activeScope)
     }
 
-    private func begin(endingAt end: Date, startedAt start: Date) {
+    private func begin(endingAt end: Date, startedAt start: Date, scope: PauseScope) {
         errorMessage = nil
         let previous = saved
         let now = previous == nil ? start : Date()
@@ -113,9 +122,13 @@ final class PauseSession: ObservableObject {
         do {
             // A replacement is registered before releasing the previous store.
             try center.startMonitoring(activity, during: schedule)
-            let state = SavedSession(activity: activity.rawValue, endDate: end, startedAt: start)
+            let state = SavedSession(activity: activity.rawValue, endDate: end, startedAt: start, scope: scope)
             let data = try JSONEncoder().encode(state)
-            PauseConfiguration.store(for: activity).webContent.blockedByFilter = .all(except: [])
+            let store = PauseConfiguration.store(for: activity)
+            store.webContent.blockedByFilter = .all(except: [])
+            if scope == .appsAndWebsites {
+                store.shield.applicationCategories = .all(except: [])
+            }
             defaults.set(data, forKey: stateKey)
             saved = state
             endDate = end

@@ -17,6 +17,7 @@ struct ContentView: View {
     @ObservedObject var session: PauseSession
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("pauseme.preferredMinutes") private var preferredMinutes = 30
+    @AppStorage("pauseme.preferredScope") private var preferredScope = PauseScope.websites
     @State private var tab = PauseTab.home
     @State private var confirmRelease = false
     @State private var now = Date()
@@ -36,7 +37,7 @@ struct ContentView: View {
         .onChange(of: scenePhase) { phase in
             if phase == .active { now = Date(); session.refresh() }
         }
-        .confirmationDialog("End your web pause now?", isPresented: $confirmRelease, titleVisibility: .visible) {
+        .confirmationDialog("End your pause now?", isPresented: $confirmRelease, titleVisibility: .visible) {
             Button("End pause", role: .destructive) { session.release() }
             Button("Keep pausing", role: .cancel) { }
         }
@@ -49,11 +50,13 @@ struct ContentView: View {
     }
 
     private var home: some View {
-        ScrollView {
-            VStack(spacing: 26) {
-                BrandHeader(light: session.endDate != nil)
-                    .padding(.top, 30)
-                if let end = session.endDate {
+        let end = session.endDate
+
+        return ScrollView {
+            VStack(spacing: end == nil ? 26 : 16) {
+                BrandHeader(light: end != nil)
+                    .padding(.top, end == nil ? 30 : 12)
+                if let end {
                     activePause(end: end)
                 } else if session.checkIn != nil {
                     CheckInView(session: session) { tab = .support }
@@ -62,12 +65,12 @@ struct ContentView: View {
                 }
             }
             .padding(.horizontal, 26)
-            .padding(.bottom, 32)
+            .padding(.bottom, end == nil ? 32 : 16)
             .frame(maxWidth: 520)
             .frame(maxWidth: .infinity)
         }
         .background {
-            if session.endDate != nil {
+            if end != nil {
                 LinearGradient(colors: [PausePalette.slate, PausePalette.deep], startPoint: .topLeading, endPoint: .bottomTrailing)
                     .ignoresSafeArea(edges: .top)
             } else {
@@ -87,7 +90,7 @@ struct ContentView: View {
                 .multilineTextAlignment(.center)
 
             if session.authorized {
-                Button { session.start(minutes: preferredMinutes) } label: {
+                Button { session.start(minutes: preferredMinutes, scope: preferredScope) } label: {
                     VStack(spacing: 12) {
                         Image(systemName: "pause.fill").font(.system(size: 46, weight: .bold))
                         Text("PAUSE ME").font(.title2.bold()).tracking(1)
@@ -100,8 +103,10 @@ struct ContentView: View {
                     .shadow(color: PausePalette.deep.opacity(0.18), radius: 18, y: 8)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Pause websites for \(preferredMinutes) minutes")
-                .accessibilityHint("Starts a voluntary Screen Time web restriction")
+                .accessibilityLabel(preferredScope == .appsAndWebsites
+                    ? Text("Pause apps and websites for \(preferredMinutes) minutes")
+                    : Text("Pause websites for \(preferredMinutes) minutes"))
+                .accessibilityHint("Starts a voluntary Screen Time restriction")
             } else {
                 Image(systemName: "hand.raised.circle")
                     .font(.system(size: 70, weight: .light)).foregroundStyle(PausePalette.teal)
@@ -115,14 +120,22 @@ struct ContentView: View {
                 .disabled(session.requestingPermission)
             }
 
-            Picker("Pause duration", selection: $preferredMinutes) {
-                ForEach([15, 30, 60], id: \.self) { Text("\($0) min").tag($0) }
+            VStack(spacing: 10) {
+                Picker("What to pause", selection: $preferredScope) {
+                    Text("Web only").tag(PauseScope.websites)
+                    Text("Apps & websites").tag(PauseScope.appsAndWebsites)
+                }
+                Picker("Pause duration", selection: $preferredMinutes) {
+                    ForEach([15, 30, 60], id: \.self) { Text("\($0) min").tag($0) }
+                }
             }
             .pickerStyle(.segmented)
             .padding(.horizontal, 10)
             Text("Pause the urge. Protect the moment.")
                 .font(.subheadline.weight(.medium)).foregroundStyle(PausePalette.teal)
-            Text("A voluntary pause for websites. Coverage depends on the browser and iOS; other app traffic may continue.")
+            Text(preferredScope == .appsAndWebsites
+                 ? "Screen Time shields apps and websites. PauseMe stays available during your pause."
+                 : "A voluntary pause for websites. Coverage varies by browser and iOS.")
                 .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
             VStack(spacing: 10) {
                 Button { tab = .progress } label: {
@@ -139,41 +152,53 @@ struct ContentView: View {
     private func activePause(end: Date) -> some View {
         let remaining = max(0, end.timeIntervalSince(now))
         let total = max(1, end.timeIntervalSince(session.startedAt ?? end.addingTimeInterval(-1800)))
-        return VStack(spacing: 24) {
-            Text("Your pause is active").font(.title3.weight(.medium)).foregroundStyle(.white)
+        return VStack(spacing: 14) {
+            Label {
+                if session.activeScope == .appsAndWebsites {
+                    Text("Apps & websites paused")
+                } else {
+                    Text("Web pause active")
+                }
+            } icon: {
+                Image(systemName: "lock.fill")
+            }
+                .font(.headline)
+                .foregroundStyle(.white)
             ZStack {
-                Circle().stroke(.white.opacity(0.12), lineWidth: 10)
+                Circle().strokeBorder(.white.opacity(0.12), lineWidth: 7)
                 Circle().trim(from: 0, to: CGFloat(min(1, remaining / total)))
-                    .stroke(AngularGradient(colors: [PausePalette.soft, PausePalette.teal, PausePalette.soft], center: .center), style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                    .stroke(AngularGradient(colors: [PausePalette.soft, PausePalette.teal, PausePalette.soft], center: .center), style: StrokeStyle(lineWidth: 7, lineCap: .round))
                     .rotationEffect(.degrees(-90))
-                VStack(spacing: 8) {
+                    .padding(3.5)
+                VStack(spacing: 4) {
                     Text(String(format: "%02d:%02d", Int(ceil(remaining)) / 60, Int(ceil(remaining)) % 60))
-                        .font(.system(size: 52, weight: .semibold, design: .rounded)).monospacedDigit()
+                        .font(.system(size: 44, weight: .semibold, design: .rounded)).monospacedDigit()
                         .minimumScaleFactor(0.7).lineLimit(1)
                     Text("Time remaining").font(.subheadline)
                 }
                 .foregroundStyle(.white)
             }
-            .frame(width: 240, height: 240).padding(.vertical, 10)
+            .frame(width: 190, height: 190)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Time remaining")
             .accessibilityValue("\(Int(ceil(remaining / 60))) minutes")
 
-            Label("Your web pause is on.", systemImage: "lock.fill")
-                .font(.subheadline.weight(.medium)).foregroundStyle(.white)
-                .frame(maxWidth: .infinity).padding(18)
-                .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 18))
-            Text("Until \(end.formatted(date: .omitted, time: .shortened)) · Take this moment for yourself.")
-                .font(.caption).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center)
-            VStack(spacing: 12) {
+            Text("Until \(end.formatted(date: .omitted, time: .shortened))")
+                .font(.subheadline).foregroundStyle(.white.opacity(0.8))
+            VStack(spacing: 8) {
                 Button("Extend pause · 15 min", action: session.extend)
-                    .buttonStyle(PauseButtonStyle(secondary: true, onDark: true))
+                    .buttonStyle(PauseButtonStyle(secondary: true, onDark: true, verticalPadding: 12))
                 Button("While you pause") { tab = .support }
-                    .buttonStyle(PauseButtonStyle(onDark: true))
-                Button("End early") { confirmRelease = true }
-                    .font(.subheadline).foregroundStyle(.white.opacity(0.8)).padding(.top, 4)
+                    .buttonStyle(PauseButtonStyle(onDark: true, verticalPadding: 12))
+                Button { confirmRelease = true } label: {
+                    Text("End early")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .frame(minWidth: 100, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
             }
-            Text("If access does not return after the pause, reopen PauseMe. You can end your pause here at any time.")
+            Text("If access doesn’t return when the timer ends, reopen PauseMe.")
                 .font(.caption).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center)
         }
     }
@@ -195,10 +220,11 @@ private struct BrandHeader: View {
 private struct PauseButtonStyle: ButtonStyle {
     var secondary = false
     var onDark = false
+    var verticalPadding: CGFloat = 15
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.body.weight(.semibold))
-            .frame(maxWidth: .infinity).padding(.vertical, 15).padding(.horizontal, 18)
+            .frame(maxWidth: .infinity).padding(.vertical, verticalPadding).padding(.horizontal, 18)
             .foregroundStyle(secondary ? (onDark ? .white : PausePalette.teal) : .white)
             .background(secondary ? Color.clear : (onDark ? PausePalette.teal.opacity(0.65) : PausePalette.teal), in: Capsule())
             .overlay(Capsule().strokeBorder(secondary ? (onDark ? .white.opacity(0.6) : PausePalette.teal) : .clear, lineWidth: 1))
@@ -689,7 +715,7 @@ private struct SettingsView: View {
                     Button("Delete pause history", role: .destructive) { confirmClear = true }.disabled(session.records.isEmpty)
                 }
                 Section("About the pause") {
-                    Text("PauseMe requests a voluntary Screen Time web filter. Browsers and web views may respect it differently. Native app traffic can continue.")
+                    Text("PauseMe uses Screen Time to filter websites and, if you choose Apps & websites, shield apps. Web coverage varies by browser and iOS.")
                     Text("iOS schedules the release. If access has not returned when expected, reopen PauseMe or end the pause early. You can revoke access in iPhone Screen Time settings.")
                     Text("PauseMe creates space for a choice. It does not replace professional support.")
                 }
